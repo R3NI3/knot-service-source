@@ -34,17 +34,25 @@
 
 #include <glib.h>
 
+#include <json-c/json.h>
+
 #include "log.h"
+#include "settings.h"
 #include "manager.h"
 
 static GMainLoop *main_loop;
 
-static const char *opt_host = NULL;
-static unsigned int opt_port = 0;
-/* Default is websockets */
-static const char *opt_proto = "http";
 static const char *opt_cfg;
+/*
+ * Settings provided by command line have higher
+ * priority than values read from config file.
+ */
+static unsigned int opt_port = 0;
+static const char *opt_host = NULL;
+static const char *opt_proto = "http";
 static const char *opt_tty = NULL;
+
+static struct settings settings;
 
 static void sig_term(int sig)
 {
@@ -65,11 +73,97 @@ static GOptionEntry options[] = {
 	{ NULL },
 };
 
+static char *load_config(const char *file)
+{
+	int length;
+	char *buffer;
+	FILE *fl;
+
+	fl = fopen(file, "r");
+	if (fl == NULL) {
+		LOG_ERROR("Failed to open file: %s", file);
+		return NULL;
+	}
+
+	fseek(fl, 0, SEEK_END);
+	length = ftell(fl);
+	fseek(fl, 0, SEEK_SET);
+
+	buffer = (char *) malloc((length + 1) * sizeof(char));
+	if (buffer == NULL) {
+		fclose(fl);
+		return NULL;
+	}
+
+	if (fread(buffer, length, 1, fl) != 1) {
+		free(buffer);
+		fclose(fl);
+		return NULL;
+	}
+
+	buffer[length] = '\0';
+
+	fclose(fl);
+
+	return buffer;
+}
+
+static int parse_config(const char *config, struct settings *settings)
+{
+	const char *uuid, *token, *tmp;
+	json_object *jobj, *obj_cloud, *obj_tmp;
+	int err = -EINVAL;
+
+	jobj = json_tokener_parse(config);
+	if (jobj == NULL)
+		return -EINVAL;
+
+	if (!json_object_object_get_ex(jobj, "cloud", &obj_cloud))
+		goto done;
+
+	if (!json_object_object_get_ex(obj_cloud, "uuid", &obj_tmp))
+		goto done;
+
+	uuid = json_object_get_string(obj_tmp);
+
+	if (!json_object_object_get_ex(obj_cloud, "token", &obj_tmp))
+		goto done;
+
+	token = json_object_get_string(obj_tmp);
+
+	if (settings->host == NULL) {
+		if (!json_object_object_get_ex(obj_cloud, "serverName",
+								 &obj_tmp))
+			goto done;
+
+		tmp = json_object_get_string(obj_tmp);
+		settings->host = g_strdup(tmp);
+	}
+
+	if (settings->port == 0) {
+		if (!json_object_object_get_ex(obj_cloud, "port", &obj_tmp))
+			goto done;
+
+		settings->port = json_object_get_int(obj_tmp);
+	}
+
+	settings->uuid = g_strdup(uuid);
+	settings->token = g_strdup(token);
+
+	err = 0; /* Success */
+
+done:
+	/* Free mem used in json parse: */
+	json_object_put(jobj);
+	return err;
+}
+
 int main(int argc, char *argv[])
 {
 	GOptionContext *context;
 	GError *gerr = NULL;
 	int err;
+	char *json_str;
 
 	LOG_INFO("KNOT Gateway\n");
 
@@ -90,10 +184,33 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	err = manager_start(opt_cfg, opt_host, opt_port, opt_proto, opt_tty);
+	json_str = load_config(opt_cfg);
+	if (json_str == NULL)
+		return EXIT_FAILURE;
+
+	memset(&settings, 0, sizeof(settings));
+	settings.proto = "http";/* only supported protocol at moment */
+	settings.tty = opt_tty;
+	/*
+	 * Command line options (host and port) have higher priority
+	 * than values read from config file. UUID and Token should
+	 * not be read from command line due security reason.
+	 */
+
+	if (opt_host)
+		settings.host = g_strdup(opt_host);
+
+	settings.port = opt_port;
+
+	err = parse_config(json_str, &settings);
+	free(json_str);
+	if (err < 0)
+		goto failure;
+
+	err = manager_start(&settings);
 	if (err < 0) {
 		LOG_ERROR("start(): %s (%d)\n", strerror(-err), -err);
-		return EXIT_FAILURE;
+		goto failure;
 	}
 
 	/* Set user id to nobody */
@@ -112,7 +229,18 @@ int main(int argc, char *argv[])
 
 	manager_stop();
 
+	g_free(settings.host);
+	g_free(settings.uuid);
+	g_free(settings.token);
+
 	LOG_INFO("Exiting\n");
 
 	return EXIT_SUCCESS;
+
+failure:
+	g_free(settings.host);
+	g_free(settings.uuid);
+	g_free(settings.token);
+
+	return EXIT_FAILURE;
 }
