@@ -468,7 +468,7 @@ done:
 	return NULL;
 }
 
-static int8_t msg_register(const credential_t *owner,
+static int8_t msg_register(char *owner_uuid,
 					int sock, int proto_sock,
 					const struct proto_ops *proto_ops,
 					const knot_msg_register *kreq,
@@ -499,7 +499,7 @@ static int8_t msg_register(const credential_t *owner,
 	json_object_object_add(jobj, "name",
 			       json_object_new_string(kreq->devName));
 	json_object_object_add(jobj, "owner",
-				json_object_new_string(owner->uuid));
+				json_object_new_string(owner_uuid));
 
 	jobjstring = json_object_to_json_string(jobj);
 
@@ -841,7 +841,7 @@ static int8_t msg_data(int sock, int proto_sock,
 	return KNOT_SUCCESS;
 }
 
-ssize_t msg_process(const credential_t *owner, int sock, int proto_sock,
+ssize_t msg_process(char *owner_uuid, int sock, int proto_sock,
 				const struct proto_ops *proto_ops,
 				const void *ipdu, size_t ilen,
 				void *opdu, size_t omtu)
@@ -883,7 +883,7 @@ ssize_t msg_process(const credential_t *owner, int sock, int proto_sock,
 	case KNOT_MSG_REGISTER_REQ:
 
 		/* Payload length is set by the caller */
-		result = msg_register(owner, sock, proto_sock, proto_ops,
+		result = msg_register(owner_uuid, sock, proto_sock, proto_ops,
 						&kreq->reg, &krsp->cred);
 		break;
 	case KNOT_MSG_UNREGISTER_REQ:
