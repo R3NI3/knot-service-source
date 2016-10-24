@@ -62,7 +62,7 @@ struct session {
 	struct node_ops *ops;
 };
 
-static credential_t *owner;
+static char uuid[37];
 
 static GSList *server_watch = NULL;
 static GSList *session_list = NULL;
@@ -214,7 +214,7 @@ static gboolean node_io_watch(GIOChannel *io, GIOCondition cond,
 	} else
 		proto_sock = g_io_channel_unix_get_fd(session->proto_io);
 
-	olen = msg_process(owner, sock, proto_sock, proto_ops[proto_index],
+	olen = msg_process(uuid, sock, proto_sock, proto_ops[proto_index],
 					ipdu, recvbytes, opdu, sizeof(opdu));
 	/* olen: output length or -errno */
 	if (olen < 0) {
@@ -297,9 +297,8 @@ int manager_start(const struct settings *settings)
 	int err, sock, i;
 	guint server_watch_id;
 
-	owner = g_new0(credential_t, 1);
-	owner->uuid = settings->uuid;
-	owner->token = settings->token;
+	strncpy(uuid, settings->uuid, 36);
+	uuid[36] = '\0';
 
 	/* Tell Serial which port to use */
 	if (settings->tty)
