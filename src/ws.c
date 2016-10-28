@@ -41,13 +41,24 @@
 
 #define MAX_PAYLOAD		4096
 #define SERVICE_TIMEOUT		100
+#define IDENTIFY_REQUEST	"42[\"identify\"]"
+#define READY_RESPONSE		"42[\"ready\""
+#define NOT_READY_RESPONSE	"42[\"notReady\""
+#define READY_RESPONSE_LEN	sizeof(READY_RESPONSE) - 1
+#define NOT_READY_RESPONSE_LEN	sizeof(NOT_READY_RESPONSE) - 1
+#define CLOUD_PATH		"/socket.io/?EIO=4&transport=websocket"
+#define DEFAULT_CLOUD_HOST	"localhost"
 
 struct lws_context *context;
 static GHashTable *wstable;
 gboolean got_response = FALSE;
 gboolean connection_error = FALSE;
 gboolean connected = FALSE;
-static struct lws *ws;
+static gboolean ready = FALSE;
+struct lws_client_connect_info info;
+static char *host_address = "localhost";
+static int host_port = 3000;
+
 
 struct per_session_data_ws {
 	struct lws *ws;
@@ -60,7 +71,22 @@ struct per_session_data_ws {
 	char *json;
 };
 
-struct per_session_data_ws *psd;
+static struct per_session_data_ws *psd;
+
+/*
+ * A received message has the following structure:
+ * <packet_type>[json_message]
+ * Packet types defined by Engine.IO:
+ */
+enum packet_type {
+	EIO_OPEN,
+	EIO_CLOSE,
+	EIO_PING,
+	EIO_PONG,
+	EIO_MSG,
+	EIO_UPGRADE,
+	EIO_NOOP
+};
 
 static gboolean timeout_ws(gpointer user_data)
 {
@@ -259,7 +285,6 @@ static void ws_close(int sock)
 	if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock)))
 		LOG_ERROR("Removing key: sock %d not found!\n", sock);
 }
-
 static int ws_mknode(int sock, const char *owner_uuid,
 					json_raw_t *json)
 {
@@ -581,11 +606,73 @@ done:
 	return err;
 }
 
+static int send_identity(void)
+{
+	int err = -ECONNREFUSED;
+	/*
+	 * An identity msg with an empty json will generate a new uuid/token
+	 * a possible FIXME is to authenticate the owner (GW)
+	 */
+	psd->len = sprintf((char *) psd->buffer + LWS_PRE,
+							"42[\"identity\",{}]");
+	lws_callback_on_writable(psd->ws);
+
+	while (!ready && !connection_error)
+		lws_service(context, SERVICE_TIMEOUT);
+
+	if (connection_error)
+		goto done;
+
+	err = 0;
+	ready = FALSE;
+	connected = TRUE;
+	got_response = FALSE;
+done:
+	g_free(psd);
+
+	return err;
+}
+
+static void handle_cloud_response(char *resp)
+{
+	int len = strlen(resp);
+	int packet_type = resp[0] - '0';
+	LOG_INFO("JSON_RX %d = %s\n", len, resp);
+
+	switch (packet_type) {
+	case EIO_OPEN:
+	case EIO_PONG:
+		/* TODO */
+		break;
+	case EIO_MSG:
+		if (!strcmp(resp, IDENTIFY_REQUEST)) {
+			connected = TRUE;
+		} else if (!strncmp(resp, READY_RESPONSE,
+						READY_RESPONSE_LEN)) {
+			ready = TRUE;
+		} else if (!strncmp(resp, NOT_READY_RESPONSE,
+					NOT_READY_RESPONSE_LEN)) {
+			connection_error = TRUE;
+		} else {
+			/*
+			 * TODO: The actual data only begins after the
+			 * '[' so, we need to parse it.
+			 */
+		}
+		break;
+	default:
+		break;
+	}
+
+	g_free(resp);
+}
+
 static int callback_lws_http(struct lws *wsi,
 					enum lws_callback_reasons reason,
 					void *user, void *in, size_t len)
 
 {
+	char *rsp;
 	LOG_INFO("reason(%02X): %s\n", reason, lws_reason2str(reason));
 
 	switch (reason) {
@@ -600,7 +687,6 @@ static int callback_lws_http(struct lws *wsi,
 		break;
 	case LWS_CALLBACK_CLIENT_ESTABLISHED:
 		LOG_INFO("LWS_CALLBACK_CLIENT_ESTABLISHED\n");
-		connected = TRUE;
 		break;
 	case LWS_CALLBACK_CLOSED:
 		LOG_INFO("LWS_CALLBACK_CLOSED\n");
@@ -612,14 +698,12 @@ static int callback_lws_http(struct lws *wsi,
 		break;
 	case LWS_CALLBACK_CLIENT_RECEIVE:
 		{
-		((char *)in)[len] = '\0';
-		psd->json = (char *) in;
-		got_response = TRUE;
-		LOG_INFO("JSON RX %d '%s'\n", (int)len, (char *)psd->json);
-		/* Flow control will be enabled again when client writes data */
-		lws_rx_flow_control(wsi, 0);
-		}
+		rsp = g_strndup(in, len);
+
+		handle_cloud_response(rsp);
+
 		break;
+		}
 	case LWS_CALLBACK_CLIENT_RECEIVE_PONG:
 		break;
 	case LWS_CALLBACK_CLIENT_WRITEABLE:
@@ -712,46 +796,53 @@ static struct lws_protocols protocols[] = {
 static int ws_connect(void)
 {
 	struct lws_client_connect_info info;
+	int err;
 	static char ads_port[300];
-
 	gboolean use_ssl = FALSE; /* wss */
-	// const char *address = "meshblu.octoblu.com";
-	const char *address = "localhost";
-	// int sock, port = 80;
-	int sock, port = 8000;
+	int sock;
 
 	memset(&info, 0, sizeof(info));
-
-	snprintf(ads_port, sizeof(ads_port), "%s:%u", address, port);
+	snprintf(ads_port, sizeof(ads_port), "%s:%u", host_address, host_port);
 
 	LOG_INFO("Connecting to %s...\n", ads_port);
 
+	psd = g_new0(struct per_session_data_ws, 1);
 	info.context = context;
-	info.address = address;
-	info.port = port;
 	info.ssl_connection = use_ssl;
-	info.path = "/ws/v2";
+	info.address = host_address;
+	info.port = host_port;
+	info.path = CLOUD_PATH;
 	info.host = info.address;
 	info.origin = info.address;
 	info.ietf_version_or_minus_one = -1;
 	info.protocol = protocols[0].name;
 
-	ws = lws_client_connect_via_info(&info);
+	psd->ws = lws_client_connect_via_info(&info);
 
-	if (ws == NULL) {
+	if (psd->ws == NULL) {
 		int err = errno;
 		LOG_ERROR("libwebsocket_client_connect(): %s(%d)\n",
 							strerror(err), err);
 		return -err;
 	}
 
-	while (!connected || connection_error)
+	while (!connected && !connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
 
-	sock = lws_get_socket_fd(ws);
-	g_hash_table_insert(wstable, GINT_TO_POINTER(sock), ws);
+	sock = lws_get_socket_fd(psd->ws);
+	g_hash_table_insert(wstable, GINT_TO_POINTER(sock), psd->ws);
 
 	connected = FALSE;
+	connection_error = FALSE;
+	got_response = FALSE;
+
+	err = send_identity();
+	if (err < 0)
+		return err;
+
+	connected = FALSE;
+	connection_error = FALSE;
+	got_response = FALSE;
 
 	/* FIXME: Investigate alternatives for libwebsocket_service() */
 	g_timeout_add_seconds(1, timeout_ws, NULL);
@@ -761,16 +852,16 @@ static int ws_connect(void)
 
 static int ws_probe(const char *host, unsigned int port)
 {
-	struct lws_context_creation_info info;
+	struct lws_context_creation_info i;
 
-	memset(&info, 0, sizeof info);
+	memset(&i, 0, sizeof i);
 
-	info.port = CONTEXT_PORT_NO_LISTEN;
-	info.gid = -1;
-	info.uid = -1;
-	info.protocols = protocols;
+	i.port = CONTEXT_PORT_NO_LISTEN;
+	i.gid = -1;
+	i.uid = -1;
+	i.protocols = protocols;
 
-	context = lws_create_context(&info);
+	context = lws_create_context(&i);
 
 	wstable = g_hash_table_new(g_direct_hash, g_direct_equal);
 
