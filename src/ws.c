@@ -88,6 +88,14 @@ enum packet_type {
 	EIO_NOOP
 };
 
+struct handshake_data {
+	const char *sid;
+	int pingInterval;
+	int pingTimeout;
+};
+
+static struct handshake_data *h_data;
+
 static gboolean timeout_ws(gpointer user_data)
 {
 	lws_service(context, 0);
@@ -147,6 +155,30 @@ static int handle_response(json_raw_t *json)
 	json_object_put(jres);
 
 	return 0;
+}
+
+static void parse_handshake_data(char *json_str)
+{
+	json_object *jobj, *jsid, *jtimeout, *jinterval;
+
+	jobj = json_tokener_parse(json_str);
+
+	if (!json_object_object_get_ex(jobj, "sid", &jsid))
+		goto done;
+	if (!json_object_object_get_ex(jobj, "pingInterval", &jinterval))
+		goto done;
+	if (!json_object_object_get_ex(jobj, "pingTimeout", &jtimeout))
+		goto done;
+
+	h_data = g_new0(struct handshake_data, 1);
+
+	h_data->sid = json_object_get_string(jsid);
+	h_data->pingInterval = json_object_get_int(jinterval);
+	h_data->pingTimeout = json_object_get_int(jtimeout);
+
+	/* TODO: Send ping every h_data.pingInterval; */
+done:
+	json_object_put(jobj);
 }
 
 static const char *lws_reason2str(enum lws_callback_reasons reason)
@@ -635,12 +667,18 @@ done:
 
 static void handle_cloud_response(char *resp)
 {
+	char dest[MAX_PAYLOAD];
 	int len = strlen(resp);
 	int packet_type = resp[0] - '0';
 	LOG_INFO("JSON_RX %d = %s\n", len, resp);
 
 	switch (packet_type) {
 	case EIO_OPEN:
+		memset(dest, '\0', sizeof(dest));
+		/* Ignore packet type and parse handshake data */
+		strncpy(dest, resp + 1, len - 1);
+		parse_handshake_data(dest);
+		break;
 	case EIO_PONG:
 		/* TODO */
 		break;
@@ -672,6 +710,7 @@ static int callback_lws_http(struct lws *wsi,
 					void *user, void *in, size_t len)
 
 {
+
 	char *rsp;
 	LOG_INFO("reason(%02X): %s\n", reason, lws_reason2str(reason));
 
