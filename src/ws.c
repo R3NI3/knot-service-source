@@ -128,7 +128,7 @@ static int ret2errno(const char *json_str, const char *expected_result)
 
 done:
 	json_object_put(jobj);
-	LOG_INFO("#################### %d", err);
+
 	return err;
 }
 static int handle_response(json_raw_t *json, char *property)
@@ -563,9 +563,8 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 					const char *jreq, json_raw_t *json)
 {
 	int err;
-	struct json_object *jobj, *ajobj, *jobjdev, *jarray, *jset;
-	const char *jobjstr;
-	const char *expected_result = "updated";
+	struct json_object *jobj, *ajobj, *jobjdev, *jarray;
+	const char *jobjstr, *expected_result = "config";
 
 	jobj = json_tokener_parse(jreq);
 	if (jobj == NULL)
@@ -580,10 +579,7 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 	json_object_object_add(jobjdev, "token", json_object_new_string(token));
 	json_object_array_add(ajobj, jobjdev);
 
-	jset = json_object_new_object();
-	json_object_object_add(jset, "$set", jobj);
-
-	json_object_array_add(ajobj, jset);
+	json_object_array_add(ajobj, jobj);
 	json_object_array_add(jarray, ajobj);
 	jobjstr = json_object_to_json_string(jarray);
 
@@ -596,25 +592,27 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 		goto done;
 	}
 
-	psd->len = sprintf((char *)&psd->buffer[LWS_PRE], "%s", jobjstr);
+	psd->len = sprintf((char *)&psd->buffer + LWS_PRE, "%d%s",
+						MESSAGE_PREFIX, jobjstr);
 	lws_callback_on_writable(psd->ws);
 
 	/* Keep serving context until server responds or an error occurs */
-	while (!got_response || connection_error)
+	while (!got_response && !connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
 
-	err = ret2errno(psd->json, expected_result);
-
-	if (err < 0)
+	if (connection_error) {
+		err = -ECONNREFUSED;
 		goto done;
+	}
 
-	err = handle_response(json, NULL);
+	err = ret2errno(psd->json, expected_result);
 
 done:
 	got_response = FALSE;
 	connection_error = FALSE;
 
 	json_object_put(jarray);
+	g_free(psd->json);
 	g_free(psd);
 
 	return err;
@@ -730,7 +728,7 @@ static void handle_cloud_response(char *resp)
 			 * FIXME: For now, we only consider responses
 			 * like: * 430["..."]
 			 */
-			if (i > 2 && i < len) {
+			if (i > 1 && i < len) {
 				psd->json = g_strndup(resp + i, len - i);
 				got_response = TRUE;
 			}
