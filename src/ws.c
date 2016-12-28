@@ -535,7 +535,7 @@ static int ws_rmnode(int sock, const char *uuid, const char *token,
 	}
 
 	psd->len = sprintf((char *)&psd->buffer + LWS_PRE, "%d%s",
-		 				MESSAGE_PREFIX, jobjstring);
+		 			REGISTER_PACKET_TYPE, jobjstring);
 	lws_callback_on_writable(psd->ws);
 
 	/* Keep serving context until server responds or an error occurs */
