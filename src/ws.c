@@ -131,10 +131,10 @@ done:
 	LOG_INFO("#################### %d", err);
 	return err;
 }
-static int handle_response(json_raw_t *json)
+static int handle_response(json_raw_t *json, char *property)
 {
 	size_t realsize;
-	json_object *jobj, *jres;
+	json_object *jobj, *jres, *jprop;
 	const char *jobjstringres;
 
 	jres = json_tokener_parse(psd->json);
@@ -142,7 +142,12 @@ static int handle_response(json_raw_t *json)
 		return -EINVAL;
 
 	jobj = json_object_array_get_idx(jres, DEVICE_INDEX);
+
 	jobjstringres = json_object_to_json_string(jobj);
+	if (property) {
+		json_object_object_get_ex(jobj, property, &jprop);
+		jobjstringres = json_object_to_json_string(jprop);
+	}
 
 	realsize = strlen(jobjstringres) + 1;
 
@@ -355,7 +360,7 @@ static int ws_mknode(int sock, const char *device_json,
 	if (connection_error)
 		err = -ECONNRESET;
 
-	err = handle_response(json);
+	err = handle_response(json, NULL);
 
 	if (err < 0)
 		goto done;
@@ -417,7 +422,7 @@ static int ws_device(int sock, const char *uuid,
 		goto done;
 	}
 
-	err = handle_response(json);
+	err = handle_response(json, "device");
 
 done:
 	got_response = FALSE;
@@ -540,7 +545,7 @@ static int ws_rmnode(int sock, const char *uuid, const char *token,
 	if (connection_error)
 		err = -ECONNRESET;
 
-	err = handle_response(json);
+	err = handle_response(json, NULL);
 
 	if (err < 0)
 		goto done;
@@ -603,7 +608,7 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 	if (err < 0)
 		goto done;
 
-	err = handle_response(json);
+	err = handle_response(json, NULL);
 
 done:
 	got_response = FALSE;
