@@ -370,6 +370,66 @@ done:
 	return err;
 }
 
+static int ws_device(int sock, const char *uuid,
+					const char *token, json_raw_t *json)
+{
+	int err;
+	const char *jobjstring;
+	json_object *jobj, *jarray;
+
+	jobj = json_object_new_object();
+	jarray = json_object_new_array();
+
+	if (!jobj || !jarray) {
+		LOG_ERROR("JSON: no memory\n");
+		err = -ENOMEM;
+		return err;
+	}
+
+	json_object_object_add(jobj, "uuid", json_object_new_string(uuid));
+
+	json_object_array_add(jarray,
+	json_object_new_string("device"));
+	json_object_array_add(jarray, jobj);
+
+	jobjstring = json_object_to_json_string(jarray);
+
+	LOG_INFO("TX JSON %s\n", jobjstring);
+
+	psd = g_new0(struct per_session_data_ws, 1);
+	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+
+	if (psd->ws == NULL) {
+		LOG_ERROR("Not found\n");
+		err = -EBADF;
+		goto done;
+	}
+
+	psd->len = sprintf((char *)&psd->buffer + LWS_PRE, "%d%s",
+						REGISTER_PACKET_TYPE, jobjstring);
+	lws_callback_on_writable(psd->ws);
+
+	while (!got_response && !connection_error)
+		lws_service(context, SERVICE_TIMEOUT);
+
+	if (connection_error) {
+		err = -ECONNREFUSED;
+		goto done;
+	}
+
+	err = handle_response(json);
+
+done:
+	got_response = FALSE;
+	connection_error = FALSE;
+
+	g_free(psd->json);
+	g_free(psd);
+	json_object_put(jarray);
+
+	return err;
+}
+
 static int ws_signin(int sock, const char *uuid, const char *token,
 							json_raw_t *json)
 {
@@ -382,7 +442,8 @@ static int ws_signin(int sock, const char *uuid, const char *token,
 
 	if (!jobj || !jarray) {
 		LOG_ERROR("JSON: no memory\n");
-		return -ENOMEM;
+		err = -ENOMEM;
+		return err;
 	}
 
 	json_object_object_add(jobj, "uuid", json_object_new_string(uuid));
@@ -418,50 +479,15 @@ static int ws_signin(int sock, const char *uuid, const char *token,
 		goto done;
 	}
 
-	ready = FALSE;
-	connection_error = FALSE;
-
-	/*
-	 * Unlike HTTP signin WS does not return the schema, so we need to
-	 * make another request to get it.
-	 */
-
-	/* Here we just replace the operation index 0 and the token */
-	json_object_array_put_idx(jarray, 0, json_object_new_string("device"));
-	json_object_object_del(json_object_array_get_idx(jarray, 1), "token");
-
-	jobjstring = json_object_to_json_string(jarray);
-
+	g_free(psd->json);
 	g_free(psd);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
-
-	if (psd->ws == NULL) {
-		LOG_ERROR("Not found\n");
-		err = -EBADF;
-		goto done;
-	}
-
-
-	psd->len = sprintf((char *)&psd->buffer + LWS_PRE, "%d%s",
-					REGISTER_PACKET_TYPE, jobjstring);
-	lws_callback_on_writable(psd->ws);
-
-	while (!got_response && !connection_error)
-		lws_service(context, SERVICE_TIMEOUT);
-
-	if (handle_response(json) < 0) {
-		err = -EIO;
-		goto done;
-	}
+	err = ws_device(sock, uuid, token, json);
 
 done:
 	ready = FALSE;
-	got_response = FALSE;
 	connection_error = FALSE;
 
-	g_free(psd);
 	json_object_put(jarray);
 
 	return err;
@@ -931,4 +957,5 @@ struct proto_ops proto_ws = {
 	.rmnode = ws_rmnode,
 	.schema = ws_schema,
 	.data = ws_data,
+	.fetch = ws_device
 };
