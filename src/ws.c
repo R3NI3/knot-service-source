@@ -1,4 +1,4 @@
-/*
+		/*
  * This file is part of the KNOT Project
  *
  * Copyright (c) 2015, CESAR. All rights reserved.
@@ -44,8 +44,10 @@
 #define IDENTIFY_REQUEST	"42[\"identify\"]"
 #define READY_RESPONSE		"42[\"ready\""
 #define NOT_READY_RESPONSE	"42[\"notReady\""
+#define CONFIG_MSG		"42[\"config\",{\"0\":"
 #define READY_RESPONSE_LEN	sizeof(READY_RESPONSE) - 1
 #define NOT_READY_RESPONSE_LEN	sizeof(NOT_READY_RESPONSE) - 1
+#define CONFIG_MSG_LEN		sizeof(CONFIG_MSG) - 1
 #define CLOUD_PATH		"/socket.io/?EIO=4&transport=websocket"
 #define DEFAULT_CLOUD_HOST	"localhost"
 #define DEVICE_INDEX		0
@@ -62,6 +64,14 @@ struct lws_client_connect_info info;
 static char *host_address = "localhost";
 static int host_port = 3000;
 
+/* Struct used to fetch data from cloud and send to THING */
+struct to_fetch {
+	int proto_sock;
+	char uuid[36+1];	/* UUID + '\0' */
+	char token[40+1];	/* TOKEN + '\0' */
+	void *user_data;
+	void (*watch_cb)(json_raw_t, void *);
+};
 
 struct per_session_data_ws {
 	struct lws *ws;
@@ -72,6 +82,7 @@ struct per_session_data_ws {
 	unsigned char buffer[LWS_PRE + MAX_PAYLOAD];
 	unsigned int len;
 	char *json;
+	struct to_fetch data;
 };
 
 static struct per_session_data_ws *psd;
@@ -98,6 +109,8 @@ struct handshake_data {
 };
 
 static struct handshake_data *h_data;
+
+
 
 static gboolean timeout_ws(gpointer user_data)
 {
@@ -186,6 +199,7 @@ static void parse_handshake_data(char *json_str)
 
 	/* TODO: Send ping every h_data.pingInterval; */
 done:
+	g_free(h_data);
 	json_object_put(jobj);
 }
 
@@ -341,8 +355,7 @@ static int ws_mknode(int sock, const char *device_json,
 	json_object_array_add(jarray, jobj);
 	jobjstring = json_object_to_json_string(jarray);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
 
 	if (psd->ws == NULL) {
 		err = -EBADF;
@@ -369,8 +382,6 @@ done:
 	got_response = FALSE;
 
 	json_object_put(jarray);
-	g_free(psd->json);
-	g_free(psd);
 
 	return err;
 }
@@ -401,8 +412,7 @@ static int ws_device(int sock, const char *uuid,
 
 	LOG_INFO("TX JSON %s\n", jobjstring);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
 
 	if (psd->ws == NULL) {
 		LOG_ERROR("Not found\n");
@@ -428,8 +438,6 @@ done:
 	got_response = FALSE;
 	connection_error = FALSE;
 
-	g_free(psd->json);
-	g_free(psd);
 	json_object_put(jarray);
 
 	return err;
@@ -462,8 +470,7 @@ static int ws_signin(int sock, const char *uuid, const char *token,
 
 	LOG_INFO("TX JSON %s\n", jobjstring);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
 
 	if (psd->ws == NULL) {
 		LOG_ERROR("Not found\n");
@@ -483,9 +490,6 @@ static int ws_signin(int sock, const char *uuid, const char *token,
 		err = -ECONNREFUSED;
 		goto done;
 	}
-
-	g_free(psd->json);
-	g_free(psd);
 
 	err = ws_device(sock, uuid, token, json);
 
@@ -525,8 +529,7 @@ static int ws_rmnode(int sock, const char *uuid, const char *token,
 
 	LOG_INFO("TX JSON %s\n", jobjstring);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
 
 	if (psd->ws == NULL) {
 		LOG_ERROR("Not found\n");
@@ -553,7 +556,6 @@ done:
 	got_response = FALSE;
 	connection_error = FALSE;
 
-	g_free(psd);
 	json_object_put(jarray);
 
 	return err;
@@ -583,8 +585,7 @@ static int ws_schema(int sock, const char *uuid, const char *token,
 	json_object_array_add(jarray, ajobj);
 	jobjstr = json_object_to_json_string(jarray);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
 
 	if (psd->ws == NULL) {
 		LOG_ERROR("Not found\n");
@@ -612,8 +613,6 @@ done:
 	connection_error = FALSE;
 
 	json_object_put(jarray);
-	g_free(psd->json);
-	g_free(psd);
 
 	return err;
 }
@@ -636,8 +635,7 @@ static int ws_data(int sock, const char *uuid, const char *token,
 	json_object_array_add(jmsg, jobj);
 	jobjstr = json_object_to_json_string(jmsg);
 
-	psd = g_new0(struct per_session_data_ws, 1);
-	psd->ws = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
 
 	if (psd->ws == NULL) {
 		LOG_ERROR("Not found\n");
@@ -658,8 +656,6 @@ done:
 	connection_error = FALSE;
 
 	json_object_put(jmsg);
-	g_free(psd->json);
-	g_free(psd);
 
 	return err;
 }
@@ -686,12 +682,11 @@ static int send_identity(void)
 	connected = TRUE;
 	got_response = FALSE;
 done:
-	g_free(psd);
 
 	return err;
 }
 
-static void handle_cloud_response(char *resp)
+static void handle_cloud_response(char *resp, struct lws *wsi)
 {
 	char dest[MAX_PAYLOAD];
 	int len = strlen(resp);
@@ -719,6 +714,50 @@ static void handle_cloud_response(char *resp)
 		} else if (!strncmp(resp, NOT_READY_RESPONSE,
 					NOT_READY_RESPONSE_LEN)) {
 			connection_error = TRUE;
+		} else if (!strncmp(resp, CONFIG_MSG, CONFIG_MSG_LEN)) {
+			json_raw_t json;
+			size_t realsize;
+			json_object *jobj, *jres;
+			const char *jobjstringres;
+			struct per_session_data_ws *session_data;
+			i = 0;
+
+			session_data = g_hash_table_lookup(wstable,
+				GINT_TO_POINTER(lws_get_socket_fd(wsi)));
+
+			if(!session_data->ws)
+				break;
+
+			while (resp[i] != '[' && i < len)
+				i++;
+
+			memset(&json, 0, sizeof(json_raw_t));
+
+			jres = json_tokener_parse(resp + i);
+			if (jres == NULL)
+				break;
+
+			jobj = json_object_array_get_idx(jres, 1);
+
+			jobjstringres = json_object_to_json_string(jobj);
+
+			realsize = strlen(jobjstringres) + 1;
+
+			json.data = (char *) realloc(json.data, json.size + realsize);
+			if (json.data == NULL) {
+				LOG_ERROR("Not enough memory\n");
+				break;
+			}
+
+			memcpy(json.data + json.size, jobjstringres, realsize);
+			json.size += realsize;
+			json.data[json.size - 1] = 0;
+
+			session_data->data.watch_cb(json,
+						session_data->data.user_data);
+
+			json_object_put(jres);
+			free(json.data);
 		} else {
 			/*
 			 * TODO: The actual data only begins after the
@@ -751,7 +790,6 @@ static int callback_lws_http(struct lws *wsi,
 
 {
 	char *rsp;
-
 	LOG_INFO("reason(%02X): %s\n", reason, lws_reason2str(reason));
 
 	switch (reason) {
@@ -778,9 +816,7 @@ static int callback_lws_http(struct lws *wsi,
 	case LWS_CALLBACK_CLIENT_RECEIVE:
 		{
 		rsp = g_strndup(in, len);
-
-		handle_cloud_response(rsp);
-
+		handle_cloud_response(rsp, wsi);
 		break;
 		}
 	case LWS_CALLBACK_CLIENT_RECEIVE_PONG:
@@ -865,10 +901,10 @@ static struct lws_protocols protocols[] = {
 	{
 		"http-only",
 		callback_lws_http,
-		0, 65536, 0, NULL
+		0,
 	},
 	{
-		NULL, NULL, 0, 0, 0, NULL /* end of list */
+		NULL, NULL, 0/* end of list */
 	}
 };
 
@@ -885,7 +921,7 @@ static int ws_connect(void)
 
 	LOG_INFO("Connecting to %s...\n", ads_port);
 
-	psd = g_new0(struct per_session_data_ws, 1);
+	psd = g_try_new0(struct per_session_data_ws, 1);
 	info.context = context;
 	info.ssl_connection = use_ssl;
 	info.address = host_address;
@@ -932,7 +968,6 @@ static int ws_connect(void)
 static int ws_probe(const char *host, unsigned int port)
 {
 	struct lws_context_creation_info i;
-
 	memset(&i, 0, sizeof i);
 
 	i.port = CONTEXT_PORT_NO_LISTEN;
@@ -949,8 +984,37 @@ static int ws_probe(const char *host, unsigned int port)
 
 static void ws_remove(void)
 {
+	g_free(psd->json);
+	g_free(psd);
 	g_hash_table_destroy(wstable);
 	lws_context_destroy(context);
+}
+
+/*
+ * Watch or poll the cloud to changes in the device.
+ */
+static unsigned int proto_register_watch(int proto_sock, const char *uuid,
+				const char *token, void (*proto_watch_cb)
+				(json_raw_t, void *), void *user_data)
+{
+	struct to_fetch *data;
+	struct per_session_data_ws *value;
+
+	data = g_new0(struct to_fetch, 1);
+
+	value = g_hash_table_lookup(wstable, GINT_TO_POINTER(proto_sock));
+
+	memcpy(data->uuid, uuid, sizeof(data->uuid));
+	memcpy(data->token, token, sizeof(data->token));
+	data->watch_cb = proto_watch_cb;
+	data->user_data = user_data;
+
+	value->data = *data;
+	g_hash_table_insert(wstable, GINT_TO_POINTER(proto_sock), value);
+
+	g_free(data);
+
+	return 0;
 }
 
 struct proto_ops proto_ws = {
@@ -964,5 +1028,6 @@ struct proto_ops proto_ws = {
 	.rmnode = ws_rmnode,
 	.schema = ws_schema,
 	.data = ws_data,
-	.fetch = ws_device
+	.fetch = ws_device,
+	.async = proto_register_watch
 };
