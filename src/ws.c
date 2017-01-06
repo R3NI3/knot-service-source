@@ -1,4 +1,4 @@
-		/*
+/*
  * This file is part of the KNOT Project
  *
  * Copyright (c) 2015, CESAR. All rights reserved.
@@ -82,7 +82,9 @@ struct per_session_data_ws {
 	unsigned char buffer[LWS_PRE + MAX_PAYLOAD];
 	unsigned int len;
 	char *json;
+	gboolean DESTROY;
 	struct to_fetch data;
+	struct timeval interval;
 };
 
 /*
@@ -109,10 +111,29 @@ struct handshake_data {
 static struct handshake_data *h_data;
 static struct per_session_data_ws *psd;
 
+static void send_ping(gpointer key, gpointer value, gpointer user_data)
+{
+	struct timeval timenow;
+	gettimeofday(&timenow, NULL);
+
+	psd = (struct per_session_data_ws *) value;
+	if (timenow.tv_sec - psd->interval.tv_sec > 10
+						/*h_data->pingInterval/1000*/) {
+		gettimeofday(&psd->interval, NULL);
+		g_hash_table_replace(wstable, key, psd);
+		psd->len = sprintf((char *) psd->buffer + LWS_PRE, "2");
+		lws_callback_on_writable(psd->ws);
+		lws_service(context, SERVICE_TIMEOUT);
+	}
+}
+
 static gboolean timeout_ws(gpointer user_data)
 {
+	struct per_session_data_ws *old_psd = psd;
 	lws_service(context, SERVICE_TIMEOUT);
-
+	/* check if some socket needs to send ping */
+	g_hash_table_foreach(wstable, send_ping, NULL);
+	psd = old_psd;
 	return TRUE;
 }
 /*
@@ -334,11 +355,19 @@ static const char *lws_reason2str(enum lws_callback_reasons reason)
 static void ws_close(int sock)
 {
 	LOG_INFO("\nWS CLOSE: %d\n", sock);
-	if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock)))
+	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
+	psd->DESTROY = TRUE;
+	lws_callback_on_writable(psd->ws);
+	lws_service(context, SERVICE_TIMEOUT);
+	if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock))){
 		LOG_ERROR("Removing key: sock %d not found!\n", sock);
+		return;
+	}
+	g_free(psd->json);
+	g_free(psd);
 }
-static int ws_mknode(int sock, const char *device_json,
-					json_raw_t *json)
+
+static int ws_mknode(int sock, const char *device_json, json_raw_t *json)
 {
 	int err;
 	json_object *jobj, *jarray;
@@ -526,7 +555,6 @@ static int ws_rmnode(int sock, const char *uuid, const char *token,
 	jobjstring = json_object_to_json_string(jarray);
 
 	LOG_INFO("TX JSON %s\n", jobjstring);
-
 	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
 
 	if (psd->ws == NULL) {
@@ -611,7 +639,6 @@ done:
 	connection_error = FALSE;
 
 	json_object_put(jarray);
-
 	return err;
 }
 
@@ -634,7 +661,6 @@ static int ws_data(int sock, const char *uuid, const char *token,
 	jobjstr = json_object_to_json_string(jmsg);
 
 	psd = g_hash_table_lookup(wstable, GINT_TO_POINTER(sock));
-
 	if (psd->ws == NULL) {
 		LOG_ERROR("Not found\n");
 		err = -EBADF;
@@ -680,7 +706,6 @@ static int send_identity(void)
 	connected = TRUE;
 	got_response = FALSE;
 done:
-
 	return err;
 }
 
@@ -702,6 +727,7 @@ static void handle_cloud_response(char *resp, struct lws *wsi)
 		break;
 	case EIO_PONG:
 		/* TODO */
+		LOG_INFO("PONG\n");
 		break;
 	case EIO_MSG:
 		if (!strcmp(resp, IDENTIFY_REQUEST)) {
@@ -789,7 +815,6 @@ static int callback_lws_http(struct lws *wsi,
 {
 	char *rsp;
 	LOG_INFO("reason(%02X): %s -- %p\n", reason, lws_reason2str(reason), user_data);
-
 	switch (reason) {
 	case LWS_CALLBACK_ESTABLISHED:
 		LOG_INFO("LWS_CALLBACK_ESTABLISHED\n");
@@ -822,10 +847,14 @@ static int callback_lws_http(struct lws *wsi,
 	case LWS_CALLBACK_CLIENT_WRITEABLE:
 		{
 		int l;
+		gettimeofday(&psd->interval, NULL);
 
 		if (psd->ws == wsi)
 			LOG_INFO("Client wsi %p writable\n", wsi);
-
+		if (psd->DESTROY){
+			lws_close_reason(wsi, LWS_CLOSE_STATUS_GOINGAWAY, NULL, 0);
+			return -1;
+		}
 		l = lws_write(psd->ws, &psd->buffer[LWS_PRE], psd->len,
 								LWS_WRITE_TEXT);
 		LOG_INFO("Wrote (%d) bytes\n", l);
@@ -938,11 +967,13 @@ static int ws_connect(void)
 							strerror(err), err);
 		return -err;
 	}
+	psd->DESTROY = FALSE;
 
 	while (!connected && !connection_error)
 		lws_service(context, SERVICE_TIMEOUT);
 
 	sock = lws_get_socket_fd(psd->ws);
+	gettimeofday(&psd->interval, NULL);
 	g_hash_table_insert(wstable, GINT_TO_POINTER(sock), psd);
 
 	connected = FALSE;
@@ -956,17 +987,13 @@ static int ws_connect(void)
 	connection_error = FALSE;
 	got_response = FALSE;
 
-	/* FIXME: Investigate alternatives for libwebsocket_service() */
-	g_timeout_add_seconds(1, timeout_ws, NULL);
-
 	return sock;
 }
 
-static void custom_free(gpointer userdata)
+static void custom_free(gpointer key, gpointer value, gpointer user_data)
 {
-	struct per_session_data_ws *psd = userdata;
+	struct per_session_data_ws *psd = value;
 
-	LOG_INFO("\n%p\n", psd);
 	g_free(psd->json);
 	g_free(psd);
 }
@@ -981,14 +1008,17 @@ static int ws_probe(const char *host, unsigned int port)
 	i.uid = -1;
 	i.protocols = protocols;
 	context = lws_create_context(&i);
-	wstable = g_hash_table_new_full(g_direct_hash, g_direct_equal,
-							NULL, custom_free);
+	wstable = g_hash_table_new(g_direct_hash, g_direct_equal);
+
+	/* FIXME: Investigate alternatives for libwebsocket_service() */
+	g_timeout_add_seconds(1, timeout_ws, NULL);
 
 	return 0;
 }
 
 static void ws_remove(void)
 {
+	g_hash_table_foreach(wstable, custom_free, NULL);
 	g_hash_table_destroy(wstable);
 	lws_context_destroy(context);
 }
