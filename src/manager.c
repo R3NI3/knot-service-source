@@ -177,6 +177,11 @@ static gboolean node_io_watch(GIOChannel *io, GIOCondition cond,
 		 * last reference and the destroy callback
 		 * is called.
 		 */
+		if (cond & G_IO_HUP){
+			proto_sock = g_io_channel_unix_get_fd(session->proto_io);
+			proto_ops[proto_index]->close(proto_sock);
+			LOG_INFO("\n%d\n", proto_sock);
+		}
 		session->node_id = 0;
 		return FALSE;
 	}

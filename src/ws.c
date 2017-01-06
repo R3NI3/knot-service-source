@@ -85,8 +85,6 @@ struct per_session_data_ws {
 	struct to_fetch data;
 };
 
-static struct per_session_data_ws *psd;
-
 /*
  * A received message has the following structure:
  * <packet_type>[json_message]
@@ -109,8 +107,7 @@ struct handshake_data {
 };
 
 static struct handshake_data *h_data;
-
-
+static struct per_session_data_ws *psd;
 
 static gboolean timeout_ws(gpointer user_data)
 {
@@ -336,6 +333,7 @@ static const char *lws_reason2str(enum lws_callback_reasons reason)
 
 static void ws_close(int sock)
 {
+	LOG_INFO("\nWS CLOSE: %d\n", sock);
 	if (!g_hash_table_remove(wstable, GINT_TO_POINTER(sock)))
 		LOG_ERROR("Removing key: sock %d not found!\n", sock);
 }
@@ -786,11 +784,11 @@ static void handle_cloud_response(char *resp, struct lws *wsi)
 
 static int callback_lws_http(struct lws *wsi,
 					enum lws_callback_reasons reason,
-					void *user, void *in, size_t len)
+					void *user_data, void *in, size_t len)
 
 {
 	char *rsp;
-	LOG_INFO("reason(%02X): %s\n", reason, lws_reason2str(reason));
+	LOG_INFO("reason(%02X): %s -- %p\n", reason, lws_reason2str(reason), user_data);
 
 	switch (reason) {
 	case LWS_CALLBACK_ESTABLISHED:
@@ -922,6 +920,7 @@ static int ws_connect(void)
 	LOG_INFO("Connecting to %s...\n", ads_port);
 
 	psd = g_try_new0(struct per_session_data_ws, 1);
+
 	info.context = context;
 	info.ssl_connection = use_ssl;
 	info.address = host_address;
@@ -931,7 +930,6 @@ static int ws_connect(void)
 	info.origin = info.address;
 	info.ietf_version_or_minus_one = -1;
 	info.protocol = protocols[0].name;
-
 	psd->ws = lws_client_connect_via_info(&info);
 
 	if (psd->ws == NULL) {
@@ -945,7 +943,7 @@ static int ws_connect(void)
 		lws_service(context, SERVICE_TIMEOUT);
 
 	sock = lws_get_socket_fd(psd->ws);
-	g_hash_table_insert(wstable, GINT_TO_POINTER(sock), psd->ws);
+	g_hash_table_insert(wstable, GINT_TO_POINTER(sock), psd);
 
 	connected = FALSE;
 	connection_error = FALSE;
@@ -954,7 +952,6 @@ static int ws_connect(void)
 	err = send_identity();
 	if (err < 0)
 		return err;
-
 	connected = FALSE;
 	connection_error = FALSE;
 	got_response = FALSE;
@@ -963,6 +960,15 @@ static int ws_connect(void)
 	g_timeout_add_seconds(1, timeout_ws, NULL);
 
 	return sock;
+}
+
+static void custom_free(gpointer userdata)
+{
+	struct per_session_data_ws *psd = userdata;
+
+	LOG_INFO("\n%p\n", psd);
+	g_free(psd->json);
+	g_free(psd);
 }
 
 static int ws_probe(const char *host, unsigned int port)
@@ -974,18 +980,15 @@ static int ws_probe(const char *host, unsigned int port)
 	i.gid = -1;
 	i.uid = -1;
 	i.protocols = protocols;
-
 	context = lws_create_context(&i);
-
-	wstable = g_hash_table_new(g_direct_hash, g_direct_equal);
+	wstable = g_hash_table_new_full(g_direct_hash, g_direct_equal,
+							NULL, custom_free);
 
 	return 0;
 }
 
 static void ws_remove(void)
 {
-	g_free(psd->json);
-	g_free(psd);
 	g_hash_table_destroy(wstable);
 	lws_context_destroy(context);
 }
