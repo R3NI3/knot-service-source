@@ -118,7 +118,7 @@ static void send_ping(gpointer key, gpointer value, gpointer user_data)
 	gettimeofday(&timenow, NULL);
 
 	psd = (struct per_session_data_ws *) value;
-	if (timenow.tv_sec - psd->interval.tv_sec > 10
+	if (timenow.tv_sec - psd->interval.tv_sec > 3
 						/*h_data->pingInterval/1000*/) {
 		gettimeofday(&psd->interval, NULL);
 		g_hash_table_replace(wstable, key, psd);
